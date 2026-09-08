@@ -18,6 +18,10 @@ static mut BUF: [u32; W * H] = [0; W * H];
 /// Per-pixel escape step counts of the last render (same layout as BUF).
 static mut ITERS: [u32; W * H] = [0; W * H];
 
+/// Solid-fractal DE field (f32, negative inside), layout z·g² + y·g + x.
+const FIELD_MAX: usize = 96;
+static mut FIELD: [f32; FIELD_MAX * FIELD_MAX * FIELD_MAX] = [0.0; FIELD_MAX * FIELD_MAX * FIELD_MAX];
+
 #[derive(Clone, Copy)]
 struct Cx {
     re: f64,
@@ -127,6 +131,135 @@ pub extern "C" fn iters_ptr() -> *const u32 {
     std::ptr::addr_of!(ITERS) as *const u32
 }
 
+// ---- Solid 3D fractals: signed-distance fields ----
+
+/// Variants: 0 bulb p8 · 1 bulb p2 · 2 bulb p3 · 3 bulb p4 · 4 bulb p6 · 5 Mandelbox s3
+fn bulb_de(x: f64, y: f64, z: f64, power: u32, iters: u32) -> f32 {
+    let n = power as f64;
+    let (mut zx, mut zy, mut zz): (f64, f64, f64) = (0.0, 0.0, 0.0);
+    let mut dr = 1.0;
+    let mut r = 0.0;
+    let mut escaped = false;
+    for _ in 0..iters {
+        r = (zx * zx + zy * zy + zz * zz).sqrt();
+        if r > 2.0 {
+            escaped = true;
+            break;
+        }
+        if r < 1e-12 {
+            // zⁿ = 0 → z ← c; dr recursion degenerates to 1
+            dr = 1.0;
+            zx = x;
+            zy = y;
+            zz = z;
+            continue;
+        }
+        let theta = (zz / r).acos() * n;
+        // φⁿ via complex recurrence instead of sin/cos of the scaled angle
+        let (cf, sf) = (zy.atan2(zx).cos(), zy.atan2(zx).sin());
+        let (mut c, mut s) = (1.0, 0.0);
+        for _ in 0..power {
+            let t = c * cf - s * sf;
+            s = s * cf + c * sf;
+            c = t;
+        }
+        let r2 = r * r;
+        let zr = match power {
+            2 => r2,
+            3 => r2 * r,
+            4 => r2 * r2,
+            6 => r2 * r2 * r2,
+            _ => r2 * r2 * r2 * r2,
+        };
+        let (st, ct) = (theta.sin(), theta.cos());
+        zx = zr * st * c + x;
+        zy = zr * st * s + y;
+        zz = zr * ct + z;
+        dr = zr / r * n * dr + 1.0;
+    }
+    if escaped {
+        (0.5 * r.ln() * r / dr) as f32
+    } else {
+        -0.05
+    }
+}
+
+fn box_de(x: f64, y: f64, z: f64, scale: f64, iters: u32) -> f32 {
+    let (mut zx, mut zy, mut zz) = (x, y, z);
+    let mut dr = 1.0;
+    let mut escaped = false;
+    for _ in 0..iters {
+        // box fold
+        zx = zx.clamp(-1.0, 1.0) * 2.0 - zx;
+        zy = zy.clamp(-1.0, 1.0) * 2.0 - zy;
+        zz = zz.clamp(-1.0, 1.0) * 2.0 - zz;
+        // sphere fold (fixedR² = 1, minR² = 0.25)
+        let r2 = zx * zx + zy * zy + zz * zz;
+        let m = if r2 < 0.25 {
+            4.0
+        } else if r2 < 1.0 {
+            1.0 / r2
+        } else {
+            1.0
+        };
+        zx *= m;
+        zy *= m;
+        zz *= m;
+        dr *= m;
+        zx = zx * scale + x;
+        zy = zy * scale + y;
+        zz = zz * scale + z;
+        dr *= scale;
+        if zx * zx + zy * zy + zz * zz > 100.0 {
+            escaped = true;
+            break;
+        }
+    }
+    if escaped {
+        ((zx * zx + zy * zy + zz * zz).sqrt() / dr) as f32
+    } else {
+        -0.05
+    }
+}
+
+/// Fill FIELD[z·g² + y·g + x] for z-slabs [z0, z1); call repeatedly with progress.
+#[no_mangle]
+pub extern "C" fn bulb_field(variant: u32, grid: u32, iters: u32, z0: u32, z1: u32) {
+    let g = grid.clamp(8, FIELD_MAX as u32) as usize;
+    let g2 = g * g;
+    let (span, power) = match variant {
+        5 => (1.8, 0),
+        1 => (1.2, 2),
+        2 => (1.2, 3),
+        3 => (1.2, 4),
+        4 => (1.2, 6),
+        _ => (1.2, 8),
+    };
+    let field = unsafe { &mut *std::ptr::addr_of_mut!(FIELD) };
+    let step = (2.0 * span) / (g as f64 - 1.0);
+    let z1 = (z1 as usize).min(g);
+    for z in (z0 as usize)..z1 {
+        let wz = z as f64 * step - span;
+        for y in 0..g {
+            let wy = y as f64 * step - span;
+            for x in 0..g {
+                let wx = x as f64 * step - span;
+                let de = if variant == 5 {
+                    box_de(wx, wy, wz, 3.0, iters)
+                } else {
+                    bulb_de(wx, wy, wz, power, iters)
+                };
+                field[z * g2 + y * g + x] = de;
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn field_ptr() -> *const f32 {
+    std::ptr::addr_of!(FIELD) as *const f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +267,7 @@ mod tests {
 
     /// Tests share the single static buffer — render+assert must be serialized.
     static BUF_LOCK: Mutex<()> = Mutex::new(());
+    static FIELD_LOCK: Mutex<()> = Mutex::new(());
 
     fn buf() -> &'static [u32] {
         unsafe { &*std::ptr::addr_of!(BUF) }
@@ -216,6 +350,36 @@ mod tests {
             let i = idx % w;
             assert_eq!(buf()[j * 2 * W + i * 2], expected);
         }
+    }
+
+    #[test]
+    fn bulb_field_separates_inside_outside_and_slabs_compose() {
+        let _g = FIELD_LOCK.lock().unwrap();
+        let field = || unsafe { &*std::ptr::addr_of!(FIELD) };
+        // Two half-slabs
+        bulb_field(0, 32, 12, 0, 16);
+        bulb_field(0, 32, 12, 16, 32);
+        let two_part: Vec<f32> = field()[..32 * 32 * 32].to_vec();
+        // Whole grid in one call must equal the slab composition
+        bulb_field(0, 32, 12, 0, 32);
+        assert_eq!(&field()[..32 * 32 * 32], &two_part[..]);
+        // Origin is interior (c = 0 never escapes), corner is far outside
+        let center = field()[16 * 32 * 32 + 16 * 32 + 16];
+        let corner = field()[0];
+        assert!(center < 0.0, "origin voxel should be inside: {center}");
+        assert!(corner > 0.0, "corner voxel should be outside: {corner}");
+    }
+
+    #[test]
+    fn mandelbox_field_sane() {
+        let _g = FIELD_LOCK.lock().unwrap();
+        bulb_field(5, 32, 12, 0, 32);
+        let field = unsafe { &*std::ptr::addr_of!(FIELD) };
+        let inside = field[..32 * 32 * 32].iter().filter(|&&v| v < 0.0).count();
+        let outside = field[..32 * 32 * 32].iter().filter(|&&v| v > 0.0).count();
+        assert!(inside > 100, "mandelbox: too few interior voxels: {inside}");
+        assert!(outside > 1000, "mandelbox: too few exterior voxels");
+        assert!(field[..32 * 32 * 32].iter().all(|v| v.is_finite()));
     }
 
     #[test]

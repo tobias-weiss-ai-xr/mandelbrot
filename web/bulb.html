@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Solid Fractals — Mandelbulb &amp; Mandelbox (Rust/WASM + three.js)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #0d0d12; color: #ddd; margin: 0; }
+  #controls { position: fixed; top: 0.6rem; left: 0.6rem; z-index: 10; display: flex; gap: 1rem;
+              align-items: center; flex-wrap: wrap; font-size: 0.85rem; background: rgba(13,13,18,0.8);
+              padding: 0.5rem 0.8rem; border-radius: 6px; }
+  a { color: #9f8cff; }
+  #status { color: #8fd0ff; min-width: 3.5rem; text-align: right; }
+  canvas { display: block; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.min.js",
+    "three/addons/objects/MarchingCubes.js": "./vendor/objects/MarchingCubes.js",
+    "three/addons/controls/OrbitControls.js": "./vendor/controls/OrbitControls.js"
+} }
+</script>
+</head>
+<body>
+<div id="controls">
+  <a href="./">2D viewer</a> · <a href="terrain.html">terrain</a>
+  <label>Fractal <select id="variant"></select></label>
+  <label>Detail <select id="detail"></select></label>
+  <label><input type="checkbox" id="spin"> Auto-rotate</label>
+  <span id="status"></span>
+  <span style="color:#888">drag = orbit · wheel = zoom · right-drag = pan</span>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { MarchingCubes } from "three/addons/objects/MarchingCubes.js";
+
+const VARIANTS = [
+  { name: "Mandelbulb p8",   id: 0, iters: 14 },
+  { name: "Mandelbulb p2",   id: 1, iters: 14 },
+  { name: "Mandelbulb p3",   id: 2, iters: 14 },
+  { name: "Mandelbulb p4",   id: 3, iters: 14 },
+  { name: "Mandelbulb p6",   id: 4, iters: 14 },
+  { name: "Mandelbox s3",    id: 5, iters: 12 },
+];
+const DETAILS = [32, 48, 64, 96];
+const ITERS_SET = 14, SLAB = 8, MESH_SCALE = 7; // MC spans [-1, 1]³
+
+const variant = document.getElementById("variant");
+const detail = document.getElementById("detail");
+const spin = document.getElementById("spin");
+const status = document.getElementById("status");
+VARIANTS.forEach((v, i) => variant.add(new Option(v.name, i)));
+DETAILS.forEach((g, i) => detail.add(new Option(`${g}³`, g, i === 2)));
+detail.value = 64;
+
+const { instance } = await WebAssembly.instantiateStreaming(fetch("mandelbrot.wasm"));
+const e = instance.exports;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0d12);
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(13, -14, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const dir1 = new THREE.DirectionalLight(0xffffff, 1.6); dir1.position.set(6, -8, 12); scene.add(dir1);
+const dir2 = new THREE.DirectionalLight(0x6688ff, 0.5); dir2.position.set(-8, 6, -4); scene.add(dir2);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.autoRotateSpeed = 1.5;
+spin.checked = true;
+spin.onchange = () => { controls.autoRotate = spin.checked; };
+controls.autoRotate = true;
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const material = new THREE.MeshStandardMaterial({ color: 0xd8c9a3, metalness: 0.4, roughness: 0.25 });
+let mesh = null, busy = false;
+
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+async function build() {
+  if (busy) return;
+  busy = true;
+  const g = +detail.value;
+  const vw = VARIANTS[+variant.value];
+  if (mesh) { scene.remove(mesh); mesh.dispose(); }
+  mesh = new MarchingCubes(g, material, false, false, 600000);
+  mesh.isolation = 0;
+  mesh.scale.setScalar(MESH_SCALE);
+  scene.add(mesh);
+
+  const t0 = performance.now();
+  for (let z = 0; z < g; z += SLAB) {
+    e.bulb_field(vw.id, g, ITERS_SET, z, Math.min(z + SLAB, g));
+    status.textContent = Math.round(100 * Math.min(z + SLAB, g) / g) + "%";
+    await nextFrame(); // yield so the page stays responsive
+  }
+  const field = new Float32Array(e.memory.buffer, e.field_ptr(), g * g * g);
+  mesh.field.set(field);          // same z·g² + y·g + x layout
+  mesh.update();
+  status.textContent = Math.round(performance.now() - t0) + " ms";
+  busy = false;
+}
+
+variant.onchange = build;
+detail.onchange = build;
+build();
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
