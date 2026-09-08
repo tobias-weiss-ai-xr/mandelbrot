@@ -22,3 +22,14 @@ The deployed site SHALL consist only of static files (HTML + `.wasm`) served by 
 #### Scenario: WASM loads with correct MIME type
 - **WHEN** the page fetches the `.wasm` file from GitHub Pages
 - **THEN** streaming instantiation succeeds (Pages serves `.wasm` as `application/wasm`)
+
+### Requirement: Optimized wasm artifact
+CI SHALL run a size/speed optimization pass (binaryen `wasm-opt`) over the built wasm module before uploading the Pages artifact, and the benchmark step SHALL gate the deployment on the performance thresholds defined in fractal-rendering.
+
+#### Scenario: Deployed artifact is optimized
+- **WHEN** the workflow builds the site
+- **THEN** the uploaded wasm is the wasm-opt-processed module
+
+#### Scenario: Benchmark gate blocks bad builds
+- **WHEN** the benchmark exceeds the regression fence or the low-res speedup falls below 2.5×
+- **THEN** the workflow fails before deploying
