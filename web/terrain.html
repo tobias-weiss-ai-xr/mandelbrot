@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mandelbrot Terrain 3D — Rust/WASM + three.js</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #101014; color: #ddd; margin: 0; }
+  #controls { position: fixed; top: 0.6rem; left: 0.6rem; z-index: 10; display: flex; gap: 1rem;
+              align-items: center; flex-wrap: wrap; font-size: 0.85rem; background: rgba(16,16,20,0.75);
+              padding: 0.5rem 0.8rem; border-radius: 6px; }
+  a { color: #9f8cff; }
+  #ms { color: #888; }
+  canvas { display: block; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.min.js",
+    "three/addons/controls/OrbitControls.js": "./vendor/controls/OrbitControls.js"
+} }
+</script>
+</head>
+<body>
+<div id="controls">
+  <a href="./">2D viewer</a>
+  <label>Variant <select id="variant"></select></label>
+  <label>Detail <select id="detail">
+    <option value="8">Coarse</option>
+    <option value="4" selected>Standard</option>
+    <option value="2">Fine</option>
+  </select></label>
+  <label><input type="checkbox" id="spin"> Auto-rotate</label>
+  <span id="ms">–</span> ms
+  <span style="color:#888">drag = orbit · wheel = zoom · right-drag = pan</span>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const W = 960, H = 640;
+const PLANE_W = 16, H_MAX = 2.5;
+const VARIANTS = [
+  { name: "Mandelbrot",   cx: -0.6,  cy:  0.0,  h: 2.7,  iters: 256 },
+  { name: "Julia",        cx:  0.0,  cy:  0.0,  h: 3.0,  iters: 256 },
+  { name: "Multibrot 3",  cx:  0.0,  cy:  0.0,  h: 3.4,  iters: 192 },
+  { name: "Burning Ship", cx: -1.75, cy: -0.03, h: 0.15, iters: 256 },
+  { name: "Tricorn",      cx: -0.6,  cy:  0.0,  h: 2.7,  iters: 256 },
+];
+const variant = document.getElementById("variant");
+const detail = document.getElementById("detail");
+const spin = document.getElementById("spin");
+const ms = document.getElementById("ms");
+VARIANTS.forEach((v, i) => variant.add(new Option(v.name, i)));
+
+const { instance } = await WebAssembly.instantiateStreaming(fetch("mandelbrot.wasm"));
+const e = instance.exports;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101014);
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, -15, 9);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const dir = new THREE.DirectionalLight(0xffffff, 1.4);
+dir.position.set(4, -6, 10);
+scene.add(dir);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.autoRotateSpeed = 1.2;
+spin.onchange = () => { controls.autoRotate = spin.checked; };
+spin.checked = true;
+controls.autoRotate = true;
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Heightfield: one vertex per pixel of the scale-render, z = sqrt(n/max), vertex colors
+// straight from the render palette. Geometry is reused while the grid size is unchanged.
+let mesh = null, grid = { w: 0, h: 0 };
+
+function heightOf(n, maxIter) {
+  return n >= maxIter ? 0 : Math.sqrt(n / maxIter) * H_MAX;
+}
+
+function rebuild(scale) {
+  const vw = VARIANTS[+variant.value];
+  const t0 = performance.now();
+  e.render(+variant.value, vw.cx, vw.cy, vw.h, vw.iters, scale);
+  const w = W / scale, h = H / scale;
+  const colors = new Uint32Array(e.memory.buffer, e.buf_ptr(), w * h);
+  const iters = new Uint32Array(e.memory.buffer, e.iters_ptr(), w * h);
+
+  if (w !== grid.w || h !== grid.h) {
+    if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+    const geo = new THREE.PlaneGeometry(PLANE_W, PLANE_W * h / w, w - 1, h - 1);
+    geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(w * h * 3), 3));
+    mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+    scene.add(mesh);
+    grid = { w, h };
+  }
+
+  const pos = mesh.geometry.attributes.position;
+  const col = mesh.geometry.attributes.color;
+  for (let k = 0; k < w * h; k++) {
+    pos.setZ(k, heightOf(iters[k], vw.iters));
+    const c = colors[k];
+    col.setXYZ(k, (c & 255) / 255, ((c >> 8) & 255) / 255, ((c >> 16) & 255) / 255);
+  }
+  pos.needsUpdate = col.needsUpdate = true;
+  mesh.geometry.computeVertexNormals();
+  ms.textContent = Math.round(performance.now() - t0);
+}
+
+function rebuildIfVisible() {
+  rebuild(+detail.value);
+}
+variant.onchange = rebuildIfVisible;
+detail.onchange = rebuildIfVisible;
+rebuildIfVisible();
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

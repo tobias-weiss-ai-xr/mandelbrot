@@ -33,7 +33,7 @@ jobs:
         run: node scripts/bench.mjs target/wasm32-unknown-unknown/release/mandelbrot.opt.wasm
       - run: |
           mkdir site
-          cp web/index.html site/
+          cp -r web/. site/
           cp target/wasm32-unknown-unknown/release/mandelbrot.opt.wasm site/mandelbrot.wasm
       - uses: actions/upload-pages-artifact@v3
         with:

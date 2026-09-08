@@ -15,6 +15,8 @@ const JULIA_C: (f64, f64) = (-0.7, 0.27015);
 ///           3 Burning Ship (|Re|,|Im|)²+c · 4 Tricorn conj(z)²+c
 
 static mut BUF: [u32; W * H] = [0; W * H];
+/// Per-pixel escape step counts of the last render (same layout as BUF).
+static mut ITERS: [u32; W * H] = [0; W * H];
 
 #[derive(Clone, Copy)]
 struct Cx {
@@ -80,6 +82,7 @@ pub extern "C" fn render(variant: u32, cx: f64, cy: f64, height: f64, max_iter: 
     let s = height / H as f64; // complex units per full-res pixel
     let sx = scale as f64;
     let buf = unsafe { &mut *std::ptr::addr_of_mut!(BUF) };
+    let iters = unsafe { &mut *std::ptr::addr_of_mut!(ITERS) };
 
     // Variant dispatch hoisted here: each arm monomorphizes the pixel loop
     // with its seed and recurrence inlined.
@@ -100,6 +103,7 @@ pub extern "C" fn render(variant: u32, cx: f64, cy: f64, height: f64, max_iter: 
                     } else {
                         color(n as f64 + 1.0 - (z.abs2() / 2.0).ln().ln() / std::f64::consts::LN_2)
                     };
+                    iters[py * w + px] = n;
                 }
             }
         };
@@ -116,6 +120,11 @@ pub extern "C" fn render(variant: u32, cx: f64, cy: f64, height: f64, max_iter: 
 #[no_mangle]
 pub extern "C" fn buf_ptr() -> *const u32 {
     std::ptr::addr_of!(BUF) as *const u32
+}
+
+#[no_mangle]
+pub extern "C" fn iters_ptr() -> *const u32 {
+    std::ptr::addr_of!(ITERS) as *const u32
 }
 
 #[cfg(test)]
@@ -206,6 +215,30 @@ mod tests {
             let j = idx / w;
             let i = idx % w;
             assert_eq!(buf()[j * 2 * W + i * 2], expected);
+        }
+    }
+
+    #[test]
+    fn iteration_buffer_matches_classification() {
+        let _g = BUF_LOCK.lock().unwrap();
+        let iters = || unsafe { &*std::ptr::addr_of!(ITERS) };
+        render(0, -0.6, 0.0, 2.7, 256, 2);
+        let (w, h) = (W / 2, H / 2);
+        // All counts within limit; count agrees with color classification.
+        for k in 0..w * h {
+            let n = iters()[k];
+            assert!(n <= 256);
+            assert_eq!(n == 256, buf()[k] == 0xFF00_0000);
+        }
+        // Scale-1 counts agree with scale-2 counts at shared pixels.
+        let samples: Vec<(usize, u32)> = (0..h).step_by(53)
+            .flat_map(|j| (0..w).step_by(59).map(move |i| (j * w + i, iters()[j * w + i])))
+            .collect();
+        render(0, -0.6, 0.0, 2.7, 256, 1);
+        for &(idx, expected) in &samples {
+            let j = idx / w;
+            let i = idx % w;
+            assert_eq!(iters()[j * 2 * W + i * 2], expected);
         }
     }
 }
