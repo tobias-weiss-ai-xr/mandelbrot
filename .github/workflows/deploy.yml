@@ -31,6 +31,10 @@ jobs:
             target/wasm32-unknown-unknown/release/mandelbrot.wasm
       - name: Benchmark gate
         run: node scripts/bench.mjs target/wasm32-unknown-unknown/release/mandelbrot.opt.wasm
+      - name: Smoke gates
+        run: |
+          node scripts/terrain-smoke.mjs target/wasm32-unknown-unknown/release/mandelbrot.opt.wasm
+          node scripts/bulb-smoke.mjs target/wasm32-unknown-unknown/release/mandelbrot.opt.wasm
       - run: |
           mkdir site
           cp -r web/. site/
