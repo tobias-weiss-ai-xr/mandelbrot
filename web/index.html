@@ -25,6 +25,7 @@
     <label>Iterations <input type="range" id="iters" min="32" max="1024" step="32" value="256">
       <span id="itersVal">256</span></label>
     <span id="hint">scroll = zoom · drag = pan</span>
+    <span id="ms">–</span> ms
   </div>
 </header>
 <canvas id="c" width="960" height="640"></canvas>
@@ -43,6 +44,7 @@ const ctx = canvas.getContext("2d");
 const select = document.getElementById("variant");
 const iters = document.getElementById("iters");
 const itersVal = document.getElementById("itersVal");
+const ms = document.getElementById("ms");
 VARIANTS.forEach((v, i) => select.add(new Option(v.name, i)));
 
 const { instance } = await WebAssembly.instantiateStreaming(fetch("mandelbrot.wasm"));
@@ -50,25 +52,47 @@ const e = instance.exports;
 
 let state = { ...VARIANTS[0] };
 
-function draw() {
-  e.render(+select.value, state.cx, state.cy, state.h, +iters.value);
-  const img = new ImageData(new Uint8ClampedArray(e.memory.buffer, e.buf_ptr(), W * H * 4), W, H);
+const SETTLE_MS = 150;
+let settleTimer = 0;
+
+function draw(scale) {
+  const w = W / scale, h = H / scale;
+  const t0 = performance.now();
+  e.render(+select.value, state.cx, state.cy, state.h, +iters.value, scale);
+  if (canvas.width !== w) { canvas.width = w; canvas.height = h; } // preview is CSS-upscaled
+  const img = new ImageData(new Uint8ClampedArray(e.memory.buffer, e.buf_ptr(), w * h * 4), w, h);
   ctx.putImageData(img, 0, 0);
+  if (scale === 1) ms.textContent = Math.round(performance.now() - t0);
 }
-let pending = false;
-function requestDraw() {
-  if (pending) return;
-  pending = true;
-  requestAnimationFrame(() => { pending = false; draw(); });
+
+// rAF-debounced; the lowest requested scale in a frame wins (full beats preview).
+let pendingScale = 0, rafId = 0;
+function requestDraw(scale) {
+  if (!pendingScale || scale < pendingScale) pendingScale = scale;
+  if (!rafId) {
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      const s = pendingScale;
+      pendingScale = 0;
+      draw(s);
+    });
+  }
+}
+
+// Continuous input: preview frames now, exactly one full render on settle.
+function interact() {
+  requestDraw(2);
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => requestDraw(1), SETTLE_MS);
 }
 
 select.onchange = () => {
   state = { ...VARIANTS[+select.value] };
   iters.value = state.iters;
   itersVal.textContent = state.iters;
-  requestDraw();
+  requestDraw(1);
 };
-iters.oninput = () => { itersVal.textContent = iters.value; requestDraw(); };
+iters.oninput = () => { itersVal.textContent = iters.value; requestDraw(1); };
 
 // screen px → complex units (canvas is CSS-scaled)
 function screenScale() {
@@ -86,7 +110,7 @@ canvas.onwheel = (ev) => {
   const s2 = state.h / H;
   state.cx = wx - (px - W / 2) * s2;
   state.cy = wy - (py - H / 2) * s2;
-  requestDraw();
+  interact();
 };
 
 let drag = null;
@@ -97,11 +121,11 @@ canvas.onpointermove = (ev) => {
   state.cx -= (ev.clientX - drag.x) * cpx;
   state.cy -= (ev.clientY - drag.y) * cpx;
   drag = { x: ev.clientX, y: ev.clientY };
-  requestDraw();
+  interact();
 };
 canvas.onpointerup = canvas.onpointercancel = () => { drag = null; };
 
-requestDraw();
+requestDraw(1);
 </script>
 </body>
 </html>

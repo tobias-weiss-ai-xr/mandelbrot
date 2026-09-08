@@ -24,10 +24,17 @@ jobs:
           targets: wasm32-unknown-unknown
       - run: cargo test
       - run: cargo build --release --target wasm32-unknown-unknown
+      - name: Optimize wasm (binaryen)
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y binaryen
+          wasm-opt -O3 -o target/wasm32-unknown-unknown/release/mandelbrot.opt.wasm \
+            target/wasm32-unknown-unknown/release/mandelbrot.wasm
+      - name: Benchmark gate
+        run: node scripts/bench.mjs target/wasm32-unknown-unknown/release/mandelbrot.opt.wasm
       - run: |
           mkdir site
           cp web/index.html site/
-          cp target/wasm32-unknown-unknown/release/mandelbrot.wasm site/
+          cp target/wasm32-unknown-unknown/release/mandelbrot.opt.wasm site/mandelbrot.wasm
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
